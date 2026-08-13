@@ -1,0 +1,29 @@
+# Staged into <skia>/zig/BUILD.gn by build.zig, and reached via
+#   bin/gn --root=. --root-target=//zig --dotfile=zig/.gn gen <out>
+#
+# `complete_static_lib` is deliberately NOT set: Skia ships its own minimal
+# GN toolchain whose `alink` rule is a plain `ar rcs`, so it lists dependent
+# archives as order-only deps and never folds their objects in. The archives
+# are merged afterwards by build-tools/bundle.sh instead.
+
+static_library("c_skia") {
+  sources = [ "binding.cpp" ]
+
+  deps = [
+    "//:skia",
+
+    # Text shaping. Without these, drawing text falls back to a naive
+    # cmap lookup: no ligatures, no emoji ZWJ sequences, no complex
+    # scripts — which is not what Chrome's canvas does.
+    "//modules/skshaper",
+    "//modules/skunicode",
+  ]
+
+  configs += [ ":c_skia_config" ]
+}
+
+config("c_skia_config") {
+  # Skia headers are included as "include/core/SkFoo.h", relative to the
+  # checkout root.
+  include_dirs = [ "//" ]
+}

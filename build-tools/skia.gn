@@ -1,0 +1,22 @@
+# Staged into <skia>/zig/.gn by build.zig, and passed as
+#   bin/gn --root=. --root-target=//zig --dotfile=zig/.gn gen <out>
+#
+# Making //zig the root target is what gets our BUILD.gn loaded at all: GN
+# only parses build files reachable from the root, and nothing in Skia's tree
+# references the shim. Skia's own //BUILD.gn is still pulled in, via the
+# //zig:c_skia -> //:skia dependency edge.
+#
+# default_args mirrors Skia's own .gn; those entries are required by its
+# BUILDCONFIG and are not overridable from --args.
+
+buildconfig = "//gn/BUILDCONFIG.gn"
+script_executable = "python3"
+
+default_args = {
+  angle_standalone = false
+  angle_enable_msl_through_spirv = false
+  angle_use_wayland = false
+
+  dawn_use_built_dxc = false
+  dawn_force_system_component_load = true
+}
