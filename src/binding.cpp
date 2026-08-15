@@ -578,14 +578,21 @@ void skiac_path_ellipse(
     // Skia's arcTo works on an axis-aligned oval in degrees, so the rotation
     // is applied by transforming the arc rather than the oval.
     const float start_degrees = SkRadiansToDegrees(start_angle);
-    float sweep_degrees = SkRadiansToDegrees(end_angle - start_angle);
+    const float delta = end_angle - start_angle;
+    float sweep_degrees;
 
-    if (anticlockwise) {
-        if (sweep_degrees > 0) sweep_degrees -= 360;
-        if (sweep_degrees < -360) sweep_degrees = -360;
+    if (SkScalarAbs(delta) >= SK_ScalarPI * 2) {
+        // A span of a full turn or more is the whole ellipse whichever way it
+        // is travelled — `arc(x, y, r, 0, 2*PI, true)` is a circle, not the
+        // empty sweep that normalising the angles into (-360, 0] would give.
+        sweep_degrees = anticlockwise ? -360.0f : 360.0f;
     } else {
-        if (sweep_degrees < 0) sweep_degrees += 360;
-        if (sweep_degrees > 360) sweep_degrees = 360;
+        sweep_degrees = SkRadiansToDegrees(delta);
+        if (anticlockwise) {
+            if (sweep_degrees > 0) sweep_degrees -= 360;
+        } else {
+            if (sweep_degrees < 0) sweep_degrees += 360;
+        }
     }
 
     const SkRect oval = SkRect::MakeLTRB(-radius_x, -radius_y, radius_x, radius_y);

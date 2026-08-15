@@ -104,6 +104,43 @@ const BuiltSkia = struct {
     lib_path: LazyPath,
 };
 
+/// Exposes a file produced at a stable external-cache path as a LazyPath.
+/// The producing step remains responsible for creating the file; this step
+/// only verifies the output and records its path for downstream compile steps.
+const ProducedFile = struct {
+    step: Build.Step,
+    output: Build.GeneratedFile,
+    path: []const u8,
+
+    fn create(b: *Build, producer: *Build.Step, path: []const u8) *ProducedFile {
+        const produced = b.allocator.create(ProducedFile) catch @panic("OOM");
+        produced.* = .{
+            .step = Build.Step.init(.{
+                .id = .custom,
+                .name = b.fmt("verify generated file {s}", .{path}),
+                .owner = b,
+                .makeFn = make,
+            }),
+            .output = undefined,
+            .path = b.dupe(path),
+        };
+        produced.output = .{ .step = &produced.step };
+        produced.step.dependOn(producer);
+        return produced;
+    }
+
+    fn lazyPath(produced: *ProducedFile) LazyPath {
+        return .{ .generated = .{ .file = &produced.output } };
+    }
+
+    fn make(step: *Build.Step, _: Build.Step.MakeOptions) !void {
+        const produced: *ProducedFile = @fieldParentPtr("step", step);
+        std.Io.Dir.cwd().access(step.owner.graph.io, produced.path, .{}) catch |err|
+            return step.fail("expected generated file '{s}': {t}", .{ produced.path, err });
+        produced.output.path = produced.path;
+    }
+};
+
 /// Resolves a toolchain library by name, using the same search the compiler
 /// that built Skia uses, so the runtime always matches the binary.
 fn hostLibrary(b: *Build, name: []const u8) []const u8 {
@@ -149,9 +186,6 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = optimize,
     });
-    // translate-c must not run before the archive exists, otherwise a fresh
-    // checkout races the bootstrap.
-    binding.step.dependOn(built.step);
 
     // Skia is compiled by the host clang++, which on Linux means libstdc++,
     // while Zig's `link_libcpp` would supply libc++. Statically folding in the
@@ -240,7 +274,12 @@ fn buildSkia(
 
     // Staging is cheap and must rerun whenever the shim changes, so it is not
     // guarded by the bootstrap marker.
-    var stage_step = bootstrap;
+    const create_stage_dir = b.addSystemCommand(&.{
+        "mkdir", "-p", b.fmt("{s}/zig", .{skia_dir}),
+    });
+    create_stage_dir.step.dependOn(bootstrap);
+
+    var stage_step = &create_stage_dir.step;
     for (staged_files) |file| {
         const copy = b.addSystemCommand(&.{ "cp", "-f" });
         copy.addFileArg(b.path(file.src));
@@ -296,9 +335,15 @@ fn buildSkia(
     bundle.setCwd(.{ .cwd_relative = skia_dir });
     bundle.step.dependOn(&clean_dead.step);
 
+    const lib_path = ProducedFile.create(
+        b,
+        &bundle.step,
+        b.fmt("{s}/{s}", .{ skia_dir, bundle_path }),
+    ).lazyPath();
+
     return .{
         .step = &bundle.step,
-        .lib_path = .{ .cwd_relative = b.fmt("{s}/{s}", .{ skia_dir, bundle_path }) },
+        .lib_path = lib_path,
     };
 }
 
