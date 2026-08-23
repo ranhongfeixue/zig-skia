@@ -1,0 +1,89 @@
+name: prebuild skia
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: true
+      target:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Parse target
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "OS=$(echo "${{ inputs.target }}" | cut -d- -f2)" >> "$GITHUB_ENV"
+          echo "ARCH=$(echo "${{ inputs.target }}" | cut -d- -f1)" >> "$GITHUB_ENV"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+
+      # Zig 0.16 expects this directory to exist when it fetches zip archives.
+      - name: Prepare Zig cache
+        shell: bash
+        run: mkdir -p "${ZIG_GLOBAL_CACHE_DIR:-$HOME/.cache/zig}/tmp"
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        if: contains(inputs.target, 'macos')
+        with:
+          python-version: '3.13'
+
+      # The pinned Skia revision requires a modern C++20-capable Clang. Use
+      # the same compiler version on both Linux architectures instead of the
+      # older distro default.
+      - name: Install dependencies (Linux)
+        if: contains(inputs.target, 'linux')
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSLo llvm.sh https://apt.llvm.org/llvm.sh
+          echo "03878e08f47b66cc95bc4b544b0db3c6d9ce8d60e6cf2492ae357984330a9eae  llvm.sh" | sha256sum -c -
+          chmod +x llvm.sh
+          sudo ./llvm.sh 21
+          sudo ln -sf /usr/bin/clang-21 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-21 /usr/local/bin/clang++
+          clang --version
+          python3 --version
+
+      - name: Show Zig environment
+        shell: bash
+        run: zig env
+
+      - name: Build Skia
+        shell: bash
+        run: |
+          set -euo pipefail
+          zig build -Dtarget="${{ inputs.target }}" -Doptimize=ReleaseSafe build-skia
+
+      - name: Package Skia archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=.skia-cache/skia/out/canvas/bundle/libskia_bundle.a
+          test -s "$source"
+          ar -t "$source" > archive-members.txt
+          test -s archive-members.txt
+          destination="libc_skia_${GITHUB_REF_NAME}_${OS}_${ARCH}.a"
+          mv "$source" "$destination"
+          ls -lh "$destination"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: skia-${{ inputs.target }}
+          path: libc_skia_*.a
+          if-no-files-found: error

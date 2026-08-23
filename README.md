@@ -60,6 +60,27 @@ mod.addImport("skia", skia.module("skia"));
 `-Dprebuilt_skia_path=/path/to/libskia_bundle.a` skips the Skia build, for CI
 and for packaging.
 
+## Prebuilt release archives
+
+GitHub Actions builds release archives for Linux and macOS on both x86_64 and
+aarch64. Run `build-release` manually to download the four workflow artifacts,
+or push a tag to attach them to that tag's GitHub Release. Assets are named:
+
+```text
+libc_skia_<zig-skia-tag>_<os>_<arch>.a
+```
+
+For example, tag `v0.1.2` publishes
+`libc_skia_v0.1.2_linux_x86_64.a`. The pinned upstream Skia revision remains
+an internal build detail and is not part of release asset names.
+
+Validate the workflow definitions locally with:
+
+```bash
+python3 -m pip install -r tests/requirements.txt
+python3 -m unittest -v tests/test_release_workflows.py
+```
+
 ## Notable build decisions
 
 **No GPU.** Ganesh and Graphite are off: there is no window or GL context, and

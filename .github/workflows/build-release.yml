@@ -1,0 +1,125 @@
+name: build-release
+
+on:
+  push:
+    tags: ["**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-x86_64-linux:
+    uses: ./.github/workflows/_prebuild-skia.yml
+    with:
+      runner: ubuntu-22.04
+      target: x86_64-linux
+
+  build-aarch64-linux:
+    uses: ./.github/workflows/_prebuild-skia.yml
+    with:
+      runner: ubuntu-22.04-arm
+      target: aarch64-linux
+
+  build-aarch64-macos:
+    uses: ./.github/workflows/_prebuild-skia.yml
+    with:
+      runner: macos-26
+      target: aarch64-macos
+
+  build-x86_64-macos:
+    uses: ./.github/workflows/_prebuild-skia.yml
+    with:
+      runner: macos-26-intel
+      target: x86_64-macos
+
+  publish-release:
+    needs:
+      - build-x86_64-linux
+      - build-aarch64-linux
+      - build-aarch64-macos
+      - build-x86_64-macos
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Download all platform archives
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          pattern: skia-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(release-assets/libc_skia_*.a)
+          if [ "${#archives[@]}" -ne 4 ]; then
+            echo "expected 4 release archives, found ${#archives[@]}" >&2
+            printf '%s\n' "${archives[@]}" >&2
+            exit 1
+          fi
+
+          expected_suffixes=(linux_x86_64 linux_aarch64 macos_aarch64 macos_x86_64)
+          for suffix in "${expected_suffixes[@]}"; do
+            matches=(release-assets/libc_skia_*_"$suffix".a)
+            if [ "${#matches[@]}" -ne 1 ]; then
+              echo "expected one archive ending in $suffix, found ${#matches[@]}" >&2
+              exit 1
+            fi
+          done
+
+          for archive in "${archives[@]}"; do
+            test -s "$archive"
+            members_file="${archive}.members"
+            ar -t "$archive" > "$members_file"
+            test -s "$members_file"
+            rm -f "$members_file"
+          done
+
+      - name: Check existing release
+        id: release-state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Update existing release assets
+        if: steps.release-state.outputs.exists == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" release-assets/libc_skia_*.a --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish recovered draft
+        if: steps.release-state.outputs.draft == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+
+      - name: Create GitHub release
+        if: steps.release-state.outputs.exists == 'false'
+        uses: ncipollo/release-action@339a81892b84b4eeb0f6e744e4574d79d0d9b8dd # v1
+        with:
+          artifactErrorsFailBuild: true
+          artifacts: release-assets/libc_skia_*.a
+          immutableCreate: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
