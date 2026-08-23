@@ -15,7 +15,7 @@ const probe_emoji = "\u{1F603}";
 /// A request that answers with a different style means the family has no such
 /// face and the renderer would synthesize it — faux bold and faux italic have
 /// both different metrics and different pixels from the real faces Chrome uses.
-fn reportStyleCoverage(fonts: skia.FontManager) !void {
+fn reportStyleCoverage(fonts: skia.FontManager, shaper: skia.Shaper) !void {
     const families = [_][:0]const u8{
         "Arial",
         "Times New Roman",
@@ -45,7 +45,7 @@ fn reportStyleCoverage(fonts: skia.FontManager) !void {
                 style.label,
                 got.weight,
                 @tagName(got.slant),
-                typeface.measureText("Hello", 16),
+                shaper.measure("Hello", typeface, 16).width,
                 if (synthesized) "SYNTHESIZED" else "real face",
             });
         }
@@ -65,6 +65,9 @@ pub fn main() !void {
     const fonts = try skia.FontManager.initFromDirectory(font_dir);
     defer fonts.deinit();
 
+    const shaper = try skia.Shaper.init(fonts);
+    defer shaper.deinit();
+
     var name_buffer: [256]u8 = undefined;
     const family_count = fonts.countFamilies();
     std.debug.print("loaded {d} families from {s}:\n", .{ family_count, font_dir });
@@ -73,7 +76,7 @@ pub fn main() !void {
         std.debug.print("  - \"{s}\"\n", .{name});
     }
 
-    try reportStyleCoverage(fonts);
+    try reportStyleCoverage(fonts, shaper);
 
     // 300x150 is the HTML default canvas size.
     const surface = try skia.Surface.init(300, 150);
@@ -95,14 +98,14 @@ pub fn main() !void {
     // Two overlapping runs, the second semi-transparent, so the output
     // depends on both glyph rasterization and alpha compositing.
     paint.setColor(.{ .r = 0x00, .g = 0x66, .b = 0x99 });
-    canvas.drawText(probe_text, 2, 15, arial, 14, paint);
+    shaper.draw(canvas, probe_text, 2, 15, arial, 14, .start, .alphabetic, paint);
 
     paint.setColor(.{ .r = 102, .g = 204, .b = 0, .a = 178 });
-    canvas.drawText(probe_text, 4, 17, arial, 14, paint);
+    shaper.draw(canvas, probe_text, 4, 17, arial, 14, .start, .alphabetic, paint);
 
     std.debug.print("\nmeasureText(\"{s}\") @14px Arial = {d}\n", .{
         probe_text,
-        arial.measureText(probe_text, 14),
+        shaper.measure(probe_text, arial, 14).width,
     });
 
     // Cross-check against widths captured from real Chrome (16px baseline),
@@ -121,7 +124,7 @@ pub fn main() !void {
     };
     std.debug.print("\n16px Arial vs captured Chrome:\n", .{});
     for (probes) |probe| {
-        const measured = arial.measureText(probe.text, 16);
+        const measured = shaper.measure(probe.text, arial, 16).width;
         if (probe.chrome) |expected| {
             std.debug.print("  {s:<18} skia={d:<12.6} chrome={d:<12.6} delta={d:.6}\n", .{
                 probe.label,
@@ -137,20 +140,23 @@ pub fn main() !void {
     if (fonts.matchFamily("Segoe UI Emoji")) |emoji| {
         defer emoji.deinit();
         paint.setColor(skia.Color.black);
-        canvas.drawText(probe_emoji, 8, 60, emoji, 32, paint);
+        shaper.draw(canvas, probe_emoji, 8, 60, emoji, 32, .start, .alphabetic, paint);
         std.debug.print("measureText(emoji) @32px Segoe UI Emoji = {d}\n", .{
-            emoji.measureText(probe_emoji, 32),
+            shaper.measure(probe_emoji, emoji, 32).width,
         });
     } else |_| {
         std.debug.print("Segoe UI Emoji not present, skipping emoji run\n", .{});
     }
 
     // A couple of shapes to exercise the AA rasterizer.
+    var circle = skia.Path.init();
+    defer circle.deinit();
+    circle.ellipse(230, 100, 34, 34, 0, 0, std.math.tau, false);
     paint.setColor(.{ .r = 40, .g = 90, .b = 220, .a = 200 });
-    canvas.drawCircle(230, 100, 34, paint);
-    paint.setStroke(true, 3);
+    canvas.drawPath(circle, paint);
+    paint.setStroke(3, .round, .round, 4);
     paint.setColor(.{ .r = 20, .g = 20, .b = 20 });
-    canvas.drawCircle(230, 100, 34, paint);
+    canvas.drawPath(circle, paint);
 
     const png = try surface.encodePng();
     defer png.deinit();

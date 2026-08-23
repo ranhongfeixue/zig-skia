@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const Build = std.Build;
 const LazyPath = Build.LazyPath;
@@ -148,6 +149,43 @@ fn hostLibrary(b: *Build, name: []const u8) []const u8 {
     return b.dupe(std.mem.trim(u8, printed, " \t\r\n"));
 }
 
+/// Skia is compiled by the host clang++. On Linux that is libstdc++, whose
+/// static archive is folded in so the result is self-contained; libgcc_eh
+/// supplies the _Unwind_* entry points libstdc++'s personality routine
+/// references. On macOS Apple clang uses libc++ instead and ships no static
+/// libc++.a — only the system dylib every macOS has, so link that.
+fn linkHostCxxRuntime(mod: *Build.Module, b: *Build, cxx_abi_provider: ?[]const u8) void {
+    if (builtin.os.tag == .macos) {
+        mod.linkSystemLibrary("c++", .{});
+        // Skia's CoreText-backed font manager (fontmgr_mac_ct) pulls in the
+        // Apple frameworks; the other font managers are built too but dead
+        // code, so only these three are needed.
+        mod.linkFramework("CoreFoundation", .{});
+        mod.linkFramework("CoreGraphics", .{});
+        mod.linkFramework("CoreText", .{});
+        return;
+    }
+
+    const libgcc_eh = hostLibrary(b, "libgcc_eh.a");
+
+    // An embedder that already links a C++ ABI runtime (V8 bundles a libc++)
+    // provides `std::exception`, `std::type_info`, `__cxxabiv1::*` and the
+    // standard exception types itself. Those are ABI-stable and live outside
+    // libc++'s `std::__1` namespace on purpose, so linking a whole libstdc++
+    // beside them fails on duplicate symbols rather than deduplicating.
+    if (cxx_abi_provider) |provider| {
+        const trim = b.addSystemCommand(&.{"sh"});
+        trim.addFileArg(b.path("build-tools/cxx-runtime.sh"));
+        trim.addArg(hostLibrary(b, "libstdc++.a"));
+        const out = trim.addOutputFileArg("libstdc++_embeddable.a");
+        trim.addArg(provider);
+        mod.addObjectFile(out);
+    } else {
+        mod.addObjectFile(.{ .cwd_relative = hostLibrary(b, "libstdc++.a") });
+    }
+    mod.addObjectFile(.{ .cwd_relative = libgcc_eh });
+}
+
 pub fn build(b: *Build) !void {
     const io = b.graph.io;
     const target = b.standardTargetOptions(.{});
@@ -187,18 +225,6 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
 
-    // Skia is compiled by the host clang++, which on Linux means libstdc++,
-    // while Zig's `link_libcpp` would supply libc++. Statically folding in the
-    // libstdc++ Skia was actually built against keeps the two from being mixed
-    // by accident, and lets an embedder keep using libc++ for its own C++
-    // dependencies: libstdc++ and libc++ mangle differently (`std::__cxx11`
-    // vs `std::__1`), and Skia is built -fno-exceptions/-fno-rtti behind a
-    // pure C header, so no C++ type ever crosses the boundary. libgcc_eh
-    // supplies the _Unwind_* entry points libstdc++'s personality routine
-    // references; nothing here throws, the symbols just have to resolve.
-    const libgcc_eh = hostLibrary(b, "libgcc_eh.a");
-    const host_libstdcxx = hostLibrary(b, "libstdc++.a");
-
     // An embedder that already links a C++ ABI runtime (V8 bundles a libc++)
     // provides `std::exception`, `std::type_info`, `__cxxabiv1::*` and the
     // standard exception types itself. Those are ABI-stable and live outside
@@ -211,15 +237,6 @@ pub fn build(b: *Build) !void {
             "symbols it shares with libstdc++ are demoted to local instead of colliding",
     );
 
-    const libstdcxx: LazyPath = if (cxx_abi_provider) |provider| blk: {
-        const trim = b.addSystemCommand(&.{"sh"});
-        trim.addFileArg(b.path("build-tools/cxx-runtime.sh"));
-        trim.addArg(host_libstdcxx);
-        const out = trim.addOutputFileArg("libstdc++_embeddable.a");
-        trim.addArg(provider);
-        break :blk out;
-    } else .{ .cwd_relative = host_libstdcxx };
-
     const skia_module = b.addModule("skia", .{
         .root_source_file = b.path("src/skia.zig"),
         .target = target,
@@ -228,8 +245,7 @@ pub fn build(b: *Build) !void {
     });
     skia_module.addImport("binding", binding.createModule());
     skia_module.addObjectFile(built.lib_path);
-    skia_module.addObjectFile(libstdcxx);
-    skia_module.addObjectFile(.{ .cwd_relative = libgcc_eh });
+    linkHostCxxRuntime(skia_module, b, cxx_abi_provider);
 
     {
         const demo_module = b.createModule(.{
@@ -254,8 +270,7 @@ pub fn build(b: *Build) !void {
         });
         test_module.addImport("binding", binding.createModule());
         test_module.addObjectFile(built.lib_path);
-        test_module.addObjectFile(libstdcxx);
-        test_module.addObjectFile(.{ .cwd_relative = libgcc_eh });
+        linkHostCxxRuntime(test_module, b, cxx_abi_provider);
 
         const tests = b.addTest(.{ .root_module = test_module });
         const run_tests = b.addRunArtifact(tests);
