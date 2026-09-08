@@ -63,16 +63,18 @@ and for packaging.
 ## Prebuilt release archives
 
 GitHub Actions builds release archives for Linux and macOS on both x86_64 and
-aarch64. Run `build-release` manually to download the four workflow artifacts,
-or push a tag to attach them to that tag's GitHub Release. Assets are named:
+aarch64, plus Windows on x86_64. Run `build-release` manually to download the
+five workflow artifacts, or push a tag to attach them to that tag's GitHub
+Release. Assets are named:
 
 ```text
 libc_skia_<zig-skia-tag>_<os>_<arch>.a
 ```
 
 For example, tag `v0.1.2` publishes
-`libc_skia_v0.1.2_linux_x86_64.a`. The pinned upstream Skia revision remains
-an internal build detail and is not part of release asset names.
+`libc_skia_v0.1.2_linux_x86_64.a`; tag `v0.1.3` publishes the Windows archive
+as `libc_skia_v0.1.3_windows_x86_64.a`. The pinned upstream Skia revision
+remains an internal build detail and is not part of release asset names.
 
 Validate the workflow definitions locally with:
 

@@ -109,6 +109,11 @@ class ReleaseWorkflowTests(unittest.TestCase):
                     "runner": "macos-26-intel",
                     "target": "x86_64-macos",
                 },
+                "build-x86_64-windows": {
+                    "uses": "./.github/workflows/_prebuild-skia.yml",
+                    "runner": "windows-2022",
+                    "target": "x86_64-windows-msvc",
+                },
             },
         )
 
@@ -201,7 +206,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         ]
         self.assertEqual(release_steps, [], "parallel build jobs must not mutate releases")
 
-    def test_tag_publisher_waits_for_and_validates_all_four_builds(self) -> None:
+    def test_tag_publisher_waits_for_and_validates_all_five_builds(self) -> None:
         workflow = load_workflow("build-release.yml")
         self.assertIn(
             "publish-release",
@@ -215,6 +220,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "build-aarch64-linux",
             "build-aarch64-macos",
             "build-x86_64-macos",
+            "build-x86_64-windows",
         }
         self.assertEqual(set(publisher["needs"]), expected_builds)
         self.assertEqual(publisher["if"], "startsWith(github.ref, 'refs/tags/')")
@@ -232,7 +238,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(download["with"]["merge-multiple"], "true")
 
         verify_script = next(step["run"] for step in steps if step.get("name") == "Verify release archives")
-        self.assertIn('"${#archives[@]}" -ne 4', verify_script)
+        self.assertIn('"${#archives[@]}" -ne 5', verify_script)
+        self.assertIn("windows_x86_64", verify_script)
         self.assertIn("ar -t", verify_script)
 
         release_state_steps = [step for step in steps if step.get("id") == "release-state"]

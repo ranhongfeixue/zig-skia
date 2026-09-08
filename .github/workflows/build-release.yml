@@ -33,12 +33,19 @@ jobs:
       runner: macos-26-intel
       target: x86_64-macos
 
+  build-x86_64-windows:
+    uses: ./.github/workflows/_prebuild-skia.yml
+    with:
+      runner: windows-2022
+      target: x86_64-windows-msvc
+
   publish-release:
     needs:
       - build-x86_64-linux
       - build-aarch64-linux
       - build-aarch64-macos
       - build-x86_64-macos
+      - build-x86_64-windows
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-22.04
     permissions:
@@ -61,13 +68,13 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
           archives=(release-assets/libc_skia_*.a)
-          if [ "${#archives[@]}" -ne 4 ]; then
-            echo "expected 4 release archives, found ${#archives[@]}" >&2
+          if [ "${#archives[@]}" -ne 5 ]; then
+            echo "expected 5 release archives, found ${#archives[@]}" >&2
             printf '%s\n' "${archives[@]}" >&2
             exit 1
           fi
 
-          expected_suffixes=(linux_x86_64 linux_aarch64 macos_aarch64 macos_x86_64)
+          expected_suffixes=(linux_x86_64 linux_aarch64 macos_aarch64 macos_x86_64 windows_x86_64)
           for suffix in "${expected_suffixes[@]}"; do
             matches=(release-assets/libc_skia_*_"$suffix".a)
             if [ "${#matches[@]}" -ne 1 ]; then
