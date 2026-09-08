@@ -52,6 +52,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("libc_skia_", script)
         self.assertIn(".a", script)
 
+    def test_windows_archive_listing_preserves_llvm_lib_option_in_git_bash(self) -> None:
+        workflow = load_workflow("_prebuild-skia.yml")
+        steps = workflow["jobs"]["build"]["steps"]
+        package = next(step for step in steps if step.get("name") == "Package Skia archive")
+
+        self.assertRegex(
+            package["run"],
+            re.compile(r"(?m)^\s*MSYS2_ARG_CONV_EXCL=/list\s+llvm-lib\.exe\s+/list\b"),
+            "Git Bash must not rewrite llvm-lib's /list option as a filesystem path",
+        )
+
     def test_entry_workflow_dispatches_exact_supported_targets(self) -> None:
         workflow = load_workflow("build-release.yml")
 

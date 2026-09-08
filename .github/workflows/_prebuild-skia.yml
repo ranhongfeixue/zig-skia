@@ -79,7 +79,7 @@ jobs:
           set -euo pipefail
           if [ "$OS" = "windows" ]; then
             source=.skia-cache/skia/out/canvas/bundle/libskia_bundle.lib
-            llvm-lib.exe /list "$source" > archive-members.txt
+            MSYS2_ARG_CONV_EXCL=/list llvm-lib.exe /list "$source" > archive-members.txt
           else
             source=.skia-cache/skia/out/canvas/bundle/libskia_bundle.a
             ar -t "$source" > archive-members.txt
