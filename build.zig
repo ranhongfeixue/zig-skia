@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const Build = std.Build;
 const LazyPath = Build.LazyPath;
@@ -59,6 +58,8 @@ const gn_args = [_][]const u8{
     "skia_enable_fontmgr_custom_empty=true",
     "skia_enable_fontmgr_fontconfig=false",
     "skia_use_fontconfig=false",
+    "skia_enable_fontmgr_win=false",
+    "skia_enable_fontmgr_win_gdi=false",
 
     // The three formats toDataURL/convertToBlob accept, both directions
     // (decode is needed for drawImage of an HTMLImageElement).
@@ -92,12 +93,10 @@ const gn_args = [_][]const u8{
     "skia_use_libavif=false",
     "skia_use_libjxl_decode=false",
     "skia_enable_pdf=false",
+    "skia_use_xps=false",
     "skia_enable_svg=false",
     "skia_enable_skottie=false",
     "skia_enable_tools=false",
-
-    "cc=\"clang\"",
-    "cxx=\"clang++\"",
 };
 
 const BuiltSkia = struct {
@@ -155,7 +154,13 @@ fn hostLibrary(b: *Build, name: []const u8) []const u8 {
 /// references. On macOS Apple clang uses libc++ instead and ships no static
 /// libc++.a — only the system dylib every macOS has, so link that.
 fn linkHostCxxRuntime(mod: *Build.Module, b: *Build, cxx_abi_provider: ?[]const u8) void {
-    if (builtin.os.tag == .macos) {
+    const target_os = mod.resolved_target.?.result.os.tag;
+    if (target_os == .windows) {
+        // The root browser module links Zig's target C++ runtime. Never feed a
+        // Windows COFF archive through the Linux libstdc++ localization script.
+        return;
+    }
+    if (target_os == .macos) {
         mod.linkSystemLibrary("c++", .{});
         // Skia's CoreText-backed font manager (fontmgr_mac_ct) pulls in the
         // Apple frameworks; the other font managers are built too but dead
@@ -213,7 +218,7 @@ pub fn build(b: *Build) !void {
     const built = if (prebuilt_skia_path) |path| BuiltSkia{
         .step = b.step("prebuilt_skia", "Use a prebuilt libc_skia.a"),
         .lib_path = .{ .cwd_relative = path },
-    } else try buildSkia(b, io, skia_dir, out_dir, optimize);
+    } else try buildSkia(b, io, skia_dir, out_dir, target, optimize);
 
     const build_step = b.step("build-skia", "Build libc_skia.a");
     build_step.dependOn(built.step);
@@ -283,6 +288,7 @@ fn buildSkia(
     io: std.Io,
     skia_dir: []const u8,
     out_dir: []const u8,
+    target: Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) !BuiltSkia {
     const bootstrap = try bootstrapSkia(b, io, skia_dir);
@@ -307,6 +313,32 @@ fn buildSkia(
     for (gn_args) |arg| {
         try args.appendSlice(b.allocator, arg);
         try args.append(b.allocator, ' ');
+    }
+    if (target.result.os.tag == .windows) {
+        const target_cpu = switch (target.result.cpu.arch) {
+            .x86_64 => "x64",
+            .x86 => "x86",
+            .aarch64 => "arm64",
+            else => return error.UnsupportedWindowsArchitecture,
+        };
+        try args.appendSlice(b.allocator, "target_os=\"win\" ");
+        try args.appendSlice(b.allocator, b.fmt("target_cpu=\"{s}\" ", .{target_cpu}));
+
+        const windows_args = [_]struct { option: []const u8, gn: []const u8 }{
+            .{ .option = "skia_win_vc", .gn = "win_vc" },
+            .{ .option = "skia_win_sdk", .gn = "win_sdk" },
+            .{ .option = "skia_win_toolchain_version", .gn = "win_toolchain_version" },
+            .{ .option = "skia_win_sdk_version", .gn = "win_sdk_version" },
+            .{ .option = "skia_clang_win", .gn = "clang_win" },
+            .{ .option = "skia_clang_win_version", .gn = "clang_win_version" },
+        };
+        for (windows_args) |arg| {
+            if (b.option([]const u8, arg.option, b.fmt("Skia GN value for {s}", .{arg.gn}))) |value| {
+                try args.appendSlice(b.allocator, b.fmt("{s}=\"{s}\" ", .{ arg.gn, value }));
+            }
+        }
+    } else {
+        try args.appendSlice(b.allocator, "cc=\"clang\" cxx=\"clang++\" ");
     }
     // Skia asserts these two are never both set.
     try args.appendSlice(b.allocator, if (optimize == .Debug)
@@ -342,6 +374,30 @@ fn buildSkia(
     });
     clean_dead.setCwd(.{ .cwd_relative = skia_dir });
     clean_dead.step.dependOn(&ninja.step);
+
+    if (target.result.os.tag == .windows) {
+        const bundle_path = b.fmt("{s}/bundle/libskia_bundle.lib", .{out_dir});
+        const librarian = b.option(
+            []const u8,
+            "skia_librarian",
+            "Path to lib.exe, llvm-lib, or lld-link for merging Skia COFF archives",
+        ) orelse "lib.exe";
+        const bundle = b.addSystemCommand(&.{"python3"});
+        bundle.addFileArg(b.path("build-tools/bundle_windows.py"));
+        bundle.addArgs(&.{ out_dir, bundle_path, librarian });
+        bundle.setCwd(.{ .cwd_relative = skia_dir });
+        bundle.step.dependOn(&clean_dead.step);
+
+        const lib_path = ProducedFile.create(
+            b,
+            &bundle.step,
+            b.fmt("{s}/{s}", .{ skia_dir, bundle_path }),
+        ).lazyPath();
+        return .{
+            .step = &bundle.step,
+            .lib_path = lib_path,
+        };
+    }
 
     const bundle_path = b.fmt("{s}/bundle/libskia_bundle.a", .{out_dir});
     const bundle = b.addSystemCommand(&.{"sh"});
