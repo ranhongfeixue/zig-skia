@@ -26,6 +26,32 @@ def load_workflow(name: str) -> dict:
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_windows_branch_builds_on_a_windows_runner(self) -> None:
+        workflow = load_workflow("build-windows.yml")
+
+        self.assertEqual(
+            workflow["on"]["push"]["branches"],
+            ["zig-skia/windows-msvc"],
+        )
+        self.assertIn("workflow_dispatch", workflow["on"])
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+
+        job = workflow["jobs"]["build-x86_64-windows"]
+        self.assertEqual(job["uses"], "./.github/workflows/_prebuild-skia.yml")
+        self.assertEqual(job["with"]["runner"], "windows-2022")
+        self.assertEqual(job["with"]["target"], "x86_64-windows-msvc")
+
+    def test_reusable_workflow_packages_windows_archive_as_a_file(self) -> None:
+        workflow = load_workflow("_prebuild-skia.yml")
+        steps = workflow["jobs"]["build"]["steps"]
+        package = next(step for step in steps if step.get("name") == "Package Skia archive")
+        script = package["run"]
+
+        self.assertIn("libskia_bundle.lib", script)
+        self.assertIn("llvm-lib", script)
+        self.assertIn("libc_skia_", script)
+        self.assertIn(".a", script)
+
     def test_entry_workflow_dispatches_exact_supported_targets(self) -> None:
         workflow = load_workflow("build-release.yml")
 
