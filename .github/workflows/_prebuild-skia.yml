@@ -73,6 +73,17 @@ jobs:
           fi
           zig build "${build_args[@]}" build-skia
 
+      - name: Verify embedded Windows ICU data
+        if: contains(inputs.target, 'windows')
+        shell: bash
+        env:
+          SKIA_WINDOWS_ARCHIVE: .skia-cache/skia/out/canvas/bundle/libskia_bundle.lib
+          SKIA_ICU_DATA: .skia-cache/skia/third_party/externals/icu/common/icudtl.dat
+          NM: llvm-nm.exe
+        run: >-
+          python3 -m unittest
+          tests.test_windows_icu_embedding.WindowsIcuEmbeddingTests.test_windows_archive_contains_complete_embedded_icu_payload
+
       - name: Package Skia archive
         shell: bash
         run: |

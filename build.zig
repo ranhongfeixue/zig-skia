@@ -10,14 +10,16 @@ const skia_rev = "7219df0fb0ff64f26adad448f94e8c001b964e6a";
 const skia_repo = "https://github.com/google/skia.git";
 
 /// Files copied into the Skia checkout during bootstrap. `src` is relative to
-/// this repo, `dest` is relative to the checkout root. The shim lives inside
-/// the checkout because GN can only see targets under its source root.
+/// this repo and `dest` is relative to the checkout root. The binding shim
+/// lives inside the checkout because GN can only see targets under its source
+/// root. The ICU loader replaces Skia's Windows-only sidecar-file loader.
 const StagedFile = struct { src: []const u8, dest: []const u8 };
 const staged_files = [_]StagedFile{
     .{ .src = "src/binding.h", .dest = "zig/binding.h" },
     .{ .src = "src/binding.cpp", .dest = "zig/binding.cpp" },
     .{ .src = "build-tools/BUILD.gn", .dest = "zig/BUILD.gn" },
     .{ .src = "build-tools/skia.gn", .dest = "zig/.gn" },
+    .{ .src = "build-tools/SkLoadICU.cpp", .dest = "third_party/icu/SkLoadICU.cpp" },
 };
 
 /// A CPU-only Skia carrying exactly the codecs and font machinery a browser
@@ -382,9 +384,35 @@ fn buildSkia(
             "skia_librarian",
             "Path to lib.exe, llvm-lib, or lld-link for merging Skia COFF archives",
         ) orelse "lib.exe";
+
+        // Skia normally ships ICU's data as an icudtl.dat sidecar on Windows.
+        // Assemble the package into a COFF object instead. SkLoadICU.cpp holds
+        // a reference to its exported symbol, so the final executable's linker
+        // pulls all of the data out of the static archive automatically.
+        const target_triple = switch (target.result.cpu.arch) {
+            .x86_64 => "x86_64-windows-msvc",
+            .x86 => "x86-windows-msvc",
+            .aarch64 => "aarch64-windows-msvc",
+            else => return error.UnsupportedWindowsArchitecture,
+        };
+        const embed_icu = b.addSystemCommand(&.{"python3"});
+        embed_icu.addFileArg(b.path("build-tools/compile_icu_data.py"));
+        embed_icu.addArgs(&.{ "--zig", b.graph.zig_exe, "--target", target_triple });
+        embed_icu.addArg("--assembly");
+        embed_icu.addFileArg(b.path("build-tools/icu_data_windows.S"));
+        embed_icu.addArg("--data");
+        embed_icu.addFileArg(.{ .cwd_relative = b.fmt(
+            "{s}/third_party/externals/icu/common/icudtl.dat",
+            .{skia_dir},
+        ) });
+        embed_icu.addArg("--output");
+        const icu_data_object = embed_icu.addOutputFileArg("icudtl_data.obj");
+        embed_icu.step.dependOn(bootstrap);
+
         const bundle = b.addSystemCommand(&.{"python3"});
         bundle.addFileArg(b.path("build-tools/bundle_windows.py"));
         bundle.addArgs(&.{ out_dir, bundle_path, librarian });
+        bundle.addFileArg(icu_data_object);
         bundle.setCwd(.{ .cwd_relative = skia_dir });
         bundle.step.dependOn(&clean_dead.step);
 

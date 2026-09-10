@@ -63,6 +63,28 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "Git Bash must not rewrite llvm-lib's /list option as a filesystem path",
         )
 
+    def test_windows_build_verifies_icu_is_embedded_before_upload(self) -> None:
+        workflow = load_workflow("_prebuild-skia.yml")
+        steps = workflow["jobs"]["build"]["steps"]
+        verify = next(
+            step for step in steps if step.get("name") == "Verify embedded Windows ICU data"
+        )
+
+        self.assertEqual(verify["if"], "contains(inputs.target, 'windows')")
+        self.assertEqual(
+            verify["env"]["SKIA_WINDOWS_ARCHIVE"],
+            ".skia-cache/skia/out/canvas/bundle/libskia_bundle.lib",
+        )
+        self.assertEqual(
+            verify["env"]["SKIA_ICU_DATA"],
+            ".skia-cache/skia/third_party/externals/icu/common/icudtl.dat",
+        )
+        self.assertEqual(verify["env"]["NM"], "llvm-nm.exe")
+        self.assertIn(
+            "test_windows_archive_contains_complete_embedded_icu_payload",
+            verify["run"],
+        )
+
     def test_entry_workflow_dispatches_exact_supported_targets(self) -> None:
         workflow = load_workflow("build-release.yml")
 

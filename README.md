@@ -14,6 +14,10 @@ build-tools/
   BUILD.gn              the c_skia target, staged into <skia>/zig/
   skia.gn               GN dotfile, staged into <skia>/zig/.gn
   bundle.sh             merges the ~20 output archives into one .a
+  bundle_windows.py     merges Windows COFF archives and ICU data
+  compile_icu_data.py   creates a cache-safe embedded ICU object
+  icu_data_windows.S    places icudtl.dat bytes in a read-only COFF section
+  SkLoadICU.cpp         initializes Windows ICU from the embedded bytes
 src/
   binding.h             pure-C API (translate-c reads this)
   binding.cpp           C++ implementation over Skia
@@ -75,6 +79,8 @@ For example, tag `v0.1.2` publishes
 `libc_skia_v0.1.2_linux_x86_64.a`; tag `v0.1.3` publishes the Windows archive
 as `libc_skia_v0.1.3_windows_x86_64.a`. The pinned upstream Skia revision
 remains an internal build detail and is not part of release asset names.
+The Windows archive embeds Skia's matching ICU data package, so applications
+that statically link it do not need to distribute `icudtl.dat` beside the EXE.
 
 Validate the workflow definitions locally with:
 
@@ -122,6 +128,14 @@ which `zig cc` rejects; disabling those would change rasterizer output.
 **No PartitionAlloc.** Skia bundles it by default and so does V8; linking both
 archives into one binary fails on ~70 duplicate `partition_alloc::*` symbols.
 Skia is left on plain malloc so the embedder's allocator wins.
+
+**Windows ICU is embedded.** Upstream Skia links an empty ICU stub on Windows
+and memory-maps `icudtl.dat` from beside the executable. This package instead
+assembles that same data into a COFF object and makes the loader initialize ICU
+from its in-memory address. The loader's symbol reference ensures the final
+static link retains the whole data object. Its SHA-256 is included in the
+generated assembly source so Zig cannot reuse a stale `.incbin` compiler-cache
+entry after an ICU update.
 
 ## Embedding beside another C++ runtime
 
