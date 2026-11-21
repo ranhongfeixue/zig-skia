@@ -19,12 +19,14 @@
 #include "include/core/SkFontMetrics.h"
 #include "include/core/SkFontMgr.h"
 #include "include/core/SkFontStyle.h"
+#include "include/core/SkImage.h"
 #include "include/core/SkImageInfo.h"
 #include "include/core/SkMatrix.h"
 #include "include/core/SkPaint.h"
 #include "include/core/SkPath.h"
 #include "include/core/SkPathBuilder.h"
 #include "include/core/SkPathTypes.h"
+#include "include/core/SkPathUtils.h"
 #include "include/core/SkPixmap.h"
 #include "include/core/SkPoint.h"
 #include "include/core/SkRect.h"
@@ -34,7 +36,9 @@
 #include "include/core/SkString.h"
 #include "include/core/SkSurface.h"
 #include "include/core/SkTextBlob.h"
+#include "include/core/SkTileMode.h"
 #include "include/core/SkTypeface.h"
+#include "include/effects/SkDashPathEffect.h"
 #include "include/effects/SkGradient.h"
 #include "include/effects/SkImageFilters.h"
 #include "include/encode/SkJpegEncoder.h"
@@ -89,6 +93,36 @@ bool peekSurfacePixels(SkSurface* surface, SkPixmap* out) {
 // Hinting is off and metrics are linear on purpose: grid-fitting would snap
 // advances to whole pixels, while measureText() is specified to report the
 // unrounded advance.
+// Windows 上 Chrome（DirectWrite）的字型框 ascent／descent 取自 OS/2 表：
+// 有 USE_TYPO_METRICS（fsSelection 第 7 位）用 sTypoAscender／sTypoDescender，否則用 usWinAscent／usWinDescent。
+// FreeType 這邊的 SkFontMetrics 是 hhea，兩者不同的字型（Noto Sans SC：hhea 1000/200、win 1160/288）
+// measureText 的 fontBoundingBox 就會跟 Chrome 不同。沒有 OS/2 表時回傳 false，照用 hhea
+bool dwriteVerticalMetrics(SkTypeface* typeface, float size, float* ascent, float* descent,
+                           float* typo_descent = nullptr) {
+    if (typeface == nullptr) return false;
+    const SkFontTableTag tag = SkSetFourByteTag('O', 'S', '/', '2');
+    uint8_t os2[78];
+    if (typeface->getTableSize(tag) < sizeof(os2)) return false;
+    if (typeface->getTableData(tag, 0, sizeof(os2), os2) != sizeof(os2)) return false;
+    const int upm = typeface->getUnitsPerEm();
+    if (upm <= 0) return false;
+    auto u16 = [&](size_t at) { return static_cast<uint16_t>((os2[at] << 8) | os2[at + 1]); };
+    auto s16 = [&](size_t at) { return static_cast<int16_t>(u16(at)); };
+    float a, d;
+    if (u16(62) & 0x80) {
+        a = s16(68);
+        d = -s16(70);
+    } else {
+        a = u16(74);
+        d = u16(76);
+    }
+    if (a + d <= 0) return false;
+    *ascent = a * size / upm;
+    *descent = d * size / upm;
+    if (typo_descent != nullptr) *typo_descent = -s16(70) * size / upm;
+    return true;
+}
+
 SkFont makeCanvasFont(SkTypeface* typeface, float size) {
     SkFont font(sk_ref_sp(typeface), size);
     font.setEdging(SkFont::Edging::kAntiAlias);
@@ -144,8 +178,20 @@ public:
             std::vector<SkRect> bounds(static_cast<size_t>(fRunGlyphCount));
             fRunFont.getBounds(
                 SkSpan(fBuffer.glyphs, fRunGlyphCount), SkSpan(bounds), nullptr);
+            // 上下的墨跡範圍照 Windows 的 Chrome 用 hinting 過的字形（DirectWrite 垂直方向對齊像素：
+            // 16px Arial 的 q 下緣 3.37px 是 3、泰文的 0.x 是 0），左右照舊用沒 hinting 的值
+            SkFont hinted = fRunFont;
+            hinted.setHinting(SkFontHinting::kNormal);
+            std::vector<SkRect> vbounds(static_cast<size_t>(fRunGlyphCount));
+            hinted.getBounds(
+                SkSpan(fBuffer.glyphs, fRunGlyphCount), SkSpan(vbounds), nullptr);
             for (int i = 0; i < fRunGlyphCount; ++i) {
                 SkRect glyph = bounds[static_cast<size_t>(i)];
+                const SkRect& vg = vbounds[static_cast<size_t>(i)];
+                if (!vg.isEmpty()) {
+                    glyph.fTop = vg.fTop;
+                    glyph.fBottom = vg.fBottom;
+                }
                 glyph.offset(fBuffer.positions[i].fX, fBuffer.positions[i].fY);
                 if (glyph.isEmpty()) continue;
                 if (fInk.isEmpty()) {
@@ -843,13 +889,20 @@ void skiac_shaper_measure(
     font.getMetrics(&font_metrics);
     // Skia reports ascent above the baseline as negative; the canvas API
     // reports the same distance as positive.
-    out->font_bounding_box_ascent = -font_metrics.fAscent;
-    out->font_bounding_box_descent = font_metrics.fDescent;
+    // em_height_* 保留 hhea（shaper 排版座標用的 ascent，呼叫端靠它把墨跡範圍換回基線）；
+    // font_bounding_box_* 與基線照 DirectWrite 的 OS/2 值（dwriteVerticalMetrics）
+    // ideographic_baseline 是基線下方的距離（正值）：Blink 用 OS/2 的 sTypoDescender
+    // （11-11 CF 錄製：16px sans-serif＝Noto Sans SC 的 ideographicBaseline 是 -1.92＝-120/1000×16）
+    float box_ascent = -font_metrics.fAscent, box_descent = font_metrics.fDescent;
+    float typo_descent = box_descent;
+    dwriteVerticalMetrics(asTypeface(typeface), size, &box_ascent, &box_descent, &typo_descent);
+    out->font_bounding_box_ascent = box_ascent;
+    out->font_bounding_box_descent = box_descent;
     out->em_height_ascent = -font_metrics.fAscent;
     out->em_height_descent = font_metrics.fDescent;
     out->alphabetic_baseline = 0;
-    out->hanging_baseline = -font_metrics.fAscent * 0.8f;
-    out->ideographic_baseline = font_metrics.fDescent;
+    out->hanging_baseline = box_ascent * 0.8f;
+    out->ideographic_baseline = typo_descent;
 
     SkPoint end{0, 0};
     SkRect ink = SkRect::MakeEmpty();
@@ -909,4 +962,170 @@ void skiac_shaper_draw(
     }
 
     asCanvas(canvas)->drawTextBlob(blob, x + dx, y + dy, *asPaint(paint));
+}
+
+// --- 擴充 ------------------------------------------------------------------
+
+namespace {
+
+// canvas 規格：虛線清單是奇數個時重複一次；有負數、非有限值或全為 0 時不畫虛線（由呼叫端過濾）
+sk_sp<SkPathEffect> makeDash(const float* intervals, int32_t count, float phase) {
+    if (intervals == nullptr || count <= 0) return nullptr;
+    std::vector<SkScalar> list(intervals, intervals + count);
+    if (list.size() % 2 == 1) list.insert(list.end(), intervals, intervals + count);
+    return SkDashPathEffect::Make(SkSpan<const SkScalar>(list.data(), list.size()), phase);
+}
+
+SkSamplingOptions samplingFor(int32_t sampling) {
+    switch (sampling) {
+        case 0: return SkSamplingOptions(SkFilterMode::kNearest, SkMipmapMode::kNone);
+        case 2: return SkSamplingOptions(SkFilterMode::kLinear, SkMipmapMode::kNearest);
+        case 3: return SkSamplingOptions(SkCubicResampler::Mitchell());
+        default: return SkSamplingOptions(SkFilterMode::kLinear, SkMipmapMode::kNone);
+    }
+}
+
+} // namespace
+
+bool skiac_path_contains(skiac_path* path, float x, float y, int32_t fill_type) {
+    if (path == nullptr) return false;
+    SkPathBuilder copy = *asPath(path);
+    copy.setFillType(fill_type == 1 ? SkPathFillType::kEvenOdd : SkPathFillType::kWinding);
+    return copy.snapshot().contains(x, y);
+}
+
+bool skiac_path_stroke_contains(
+    skiac_path* path,
+    float x,
+    float y,
+    float width,
+    int32_t cap,
+    int32_t join,
+    float miter_limit,
+    const float* dashes,
+    int32_t dash_count,
+    float dash_phase) {
+    if (path == nullptr) return false;
+    SkPaint paint;
+    paint.setStyle(SkPaint::kStroke_Style);
+    paint.setStrokeWidth(width);
+    paint.setStrokeCap(static_cast<SkPaint::Cap>(
+        cap >= 0 && cap <= SkPaint::kLast_Cap ? cap : SkPaint::kButt_Cap));
+    paint.setStrokeJoin(static_cast<SkPaint::Join>(
+        join >= 0 && join <= SkPaint::kLast_Join ? join : SkPaint::kMiter_Join));
+    paint.setStrokeMiter(miter_limit);
+    paint.setPathEffect(makeDash(dashes, dash_count, dash_phase));
+    SkPath outline = skpathutils::FillPathWithPaint(asPath(path)->snapshot(), paint);
+    outline.setFillType(SkPathFillType::kWinding);
+    return outline.contains(x, y);
+}
+
+void skiac_paint_set_dash(skiac_paint* paint, const float* intervals, int32_t count, float phase) {
+    if (paint == nullptr) return;
+    asPaint(paint)->setPathEffect(makeDash(intervals, count, phase));
+}
+
+skiac_shader* skiac_shader_conic_gradient(
+    float cx,
+    float cy,
+    float start_radians,
+    const uint32_t* colors,
+    const float* positions,
+    int32_t count) {
+    if (colors == nullptr || positions == nullptr || count <= 0) return nullptr;
+    std::vector<SkColor4f> stops = toColor4f(colors, count);
+    const SkGradient gradient(
+        SkGradient::Colors(
+            SkSpan(stops), SkSpan(positions, static_cast<size_t>(count)), SkTileMode::kClamp),
+        SkGradient::Interpolation{});
+    // Blink：CanvasGradient 的 conic 角度是 Rad2deg(startAngle) + 90，產生 shader 時再減 90（Skia 從 x 軸起算）
+    SkMatrix local = SkMatrix::RotateDeg(SkRadiansToDegrees(start_radians), SkPoint{cx, cy});
+    sk_sp<SkShader> shader = SkShaders::SweepGradient(SkPoint{cx, cy}, 0, 360, gradient, &local);
+    if (!shader) return nullptr;
+    return reinterpret_cast<skiac_shader*>(shader.release());
+}
+
+skiac_shader* skiac_shader_surface_pattern(
+    skiac_surface* source,
+    bool repeat_x,
+    bool repeat_y,
+    int32_t sampling,
+    const float* matrix_six) {
+    if (source == nullptr) return nullptr;
+    sk_sp<SkImage> image = asSurface(source)->makeImageSnapshot();
+    if (!image) return nullptr;
+    SkMatrix local = SkMatrix::I();
+    if (matrix_six != nullptr) {
+        local = canvasMatrix(matrix_six[0], matrix_six[1], matrix_six[2], matrix_six[3], matrix_six[4], matrix_six[5]);
+    }
+    sk_sp<SkShader> shader = image->makeShader(
+        repeat_x ? SkTileMode::kRepeat : SkTileMode::kDecal,
+        repeat_y ? SkTileMode::kRepeat : SkTileMode::kDecal,
+        samplingFor(sampling),
+        &local);
+    if (!shader) return nullptr;
+    return reinterpret_cast<skiac_shader*>(shader.release());
+}
+
+void skiac_canvas_draw_surface_rect_sampled(
+    skiac_canvas* canvas,
+    skiac_surface* source,
+    float src_x,
+    float src_y,
+    float src_width,
+    float src_height,
+    float dst_x,
+    float dst_y,
+    float dst_width,
+    float dst_height,
+    int32_t sampling,
+    skiac_paint* paint) {
+    if (canvas == nullptr || source == nullptr) return;
+    sk_sp<SkImage> image = asSurface(source)->makeImageSnapshot();
+    if (!image) return;
+    asCanvas(canvas)->drawImageRect(
+        image,
+        SkRect::MakeXYWH(src_x, src_y, src_width, src_height),
+        SkRect::MakeXYWH(dst_x, dst_y, dst_width, dst_height),
+        samplingFor(sampling),
+        paint == nullptr ? nullptr : asPaint(paint),
+        SkCanvas::kStrict_SrcRectConstraint);
+}
+
+void skiac_canvas_save_layer(skiac_canvas* canvas, skiac_paint* paint) {
+    if (canvas == nullptr) return;
+    asCanvas(canvas)->saveLayer(nullptr, paint == nullptr ? nullptr : asPaint(paint));
+}
+
+void skiac_path_add_arc(
+    skiac_path* path,
+    float cx,
+    float cy,
+    float radius_x,
+    float radius_y,
+    float rotation,
+    float start_angle,
+    float sweep,
+    const float* matrix_six) {
+    if (path == nullptr || radius_x < 0 || radius_y < 0) return;
+    const SkRect oval = SkRect::MakeLTRB(-radius_x, -radius_y, radius_x, radius_y);
+    const SkScalar start_degrees = SkRadiansToDegrees(start_angle);
+    const SkScalar sweep_degrees = SkRadiansToDegrees(sweep);
+    SkPathBuilder arc;
+    if (SkScalarNearlyEqual(sweep_degrees, 360)) {
+        arc.arcTo(oval, start_degrees, 180, true);
+        arc.arcTo(oval, start_degrees + 180, 180, false);
+    } else if (SkScalarNearlyEqual(sweep_degrees, -360)) {
+        arc.arcTo(oval, start_degrees, -180, true);
+        arc.arcTo(oval, start_degrees - 180, -180, false);
+    } else {
+        arc.arcTo(oval, start_degrees, sweep_degrees, true);
+    }
+    SkMatrix local = SkMatrix::RotateRad(rotation);
+    local.postTranslate(cx, cy);
+    if (matrix_six != nullptr) {
+        local.postConcat(canvasMatrix(matrix_six[0], matrix_six[1], matrix_six[2], matrix_six[3], matrix_six[4], matrix_six[5]));
+    }
+    // kExtend：用直線接上目前的子路徑（canvas 規格）；沒有目前點時就是新的子路徑
+    asPath(path)->addPath(arc.snapshot(&local), SkPath::kExtend_AddPathMode);
 }

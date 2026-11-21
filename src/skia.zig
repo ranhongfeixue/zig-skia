@@ -139,6 +139,8 @@ pub const BlendMode = enum(i32) {
 };
 
 pub const LineCap = enum(i32) { butt = 0, round = 1, square = 2 };
+/// 圖片取樣：imageSmoothingEnabled＝false 是 nearest；quality low／medium／high（擴充）。
+pub const Sampling = enum(i32) { nearest = 0, linear = 1, mipmap = 2, cubic = 3 };
 pub const LineJoin = enum(i32) { miter = 0, round = 1, bevel = 2 };
 pub const FillRule = enum(i32) { nonzero = 0, evenodd = 1 };
 pub const TextAlign = enum(i32) { start = 0, end = 1, center = 2 };
@@ -232,6 +234,28 @@ pub const Shader = struct {
     /// Gradients with more stops than this are truncated rather than
     /// allocating; no real page defines anywhere near this many.
     pub const max_stops = 64;
+
+    /// createConicGradient：從 x 軸起算 start_radians（順時針）一整圈（擴充）。
+    pub fn conicGradient(cx: f32, cy: f32, start_radians: f32, stops: []const Stop) ?Shader {
+        var colors: [max_stops]u32 = undefined;
+        var positions: [max_stops]f32 = undefined;
+        const count = build(stops, &colors, &positions);
+        if (count == 0) return null;
+        const handle = c.skiac_shader_conic_gradient(cx, cy, start_radians, &colors, &positions, @intCast(count)) orelse return null;
+        return .{ .handle = handle };
+    }
+
+    /// createPattern：以 source 目前的內容為圖樣；不重複的方向畫成透明（擴充）。
+    pub fn surfacePattern(source: Surface, repeat_x: bool, repeat_y: bool, sampling: Sampling, matrix: ?[6]f32) ?Shader {
+        const handle = c.skiac_shader_surface_pattern(
+            source.handle,
+            repeat_x,
+            repeat_y,
+            @intFromEnum(sampling),
+            if (matrix) |*m| m else null,
+        ) orelse return null;
+        return .{ .handle = handle };
+    }
 };
 
 pub const Paint = struct {
@@ -278,6 +302,11 @@ pub const Paint = struct {
 
     pub fn setShader(self: Paint, shader: ?Shader) void {
         c.skiac_paint_set_shader(self.handle, if (shader) |s| s.handle else null);
+    }
+
+    /// setLineDash／lineDashOffset；空清單清除虛線（擴充）。
+    pub fn setDash(self: Paint, intervals: []const f32, phase: f32) void {
+        c.skiac_paint_set_dash(self.handle, if (intervals.len > 0) intervals.ptr else null, @intCast(intervals.len), phase);
     }
 
     /// Installs the CSS `filter` chain and the canvas shadow together; Skia
@@ -330,6 +359,32 @@ pub const Path = struct {
 
     pub fn setFillRule(self: Path, rule: FillRule) void {
         c.skiac_path_set_fill_type(self.handle, @intFromEnum(rule));
+    }
+
+    /// arc／ellipse：Blink 的 Path::AddEllipse（conic 曲線），弧建立後乘上 matrix 接在目前子路徑後面（擴充）。
+    pub fn addArc(self: Path, cx: f32, cy: f32, rx: f32, ry: f32, rotation: f32, start: f32, sweep: f32, matrix: ?[6]f32) void {
+        c.skiac_path_add_arc(self.handle, cx, cy, rx, ry, rotation, start, sweep, if (matrix) |*m| m else null);
+    }
+
+    /// isPointInPath（擴充）。
+    pub fn contains(self: Path, x: f32, y: f32, rule: FillRule) bool {
+        return c.skiac_path_contains(self.handle, x, y, @intFromEnum(rule));
+    }
+
+    /// isPointInStroke：照筆畫參數（含虛線）展開輪廓後判斷（擴充）。
+    pub fn strokeContains(self: Path, x: f32, y: f32, width: f32, cap: LineCap, join: LineJoin, miter_limit: f32, dashes: []const f32, phase: f32) bool {
+        return c.skiac_path_stroke_contains(
+            self.handle,
+            x,
+            y,
+            width,
+            @intFromEnum(cap),
+            @intFromEnum(join),
+            miter_limit,
+            if (dashes.len > 0) dashes.ptr else null,
+            @intCast(dashes.len),
+            phase,
+        );
     }
 
     pub fn moveTo(self: Path, x: f32, y: f32) void {
@@ -477,6 +532,29 @@ pub const Canvas = struct {
             dst[3],
             if (paint) |p| p.handle else null,
         );
+    }
+
+    /// drawImage 的取樣方式照 imageSmoothing（擴充）。
+    pub fn drawSurfaceRectSampled(self: Canvas, source: Surface, src: [4]f32, dst: [4]f32, sampling: Sampling, paint: ?Paint) void {
+        c.skiac_canvas_draw_surface_rect_sampled(
+            self.handle,
+            source.handle,
+            src[0],
+            src[1],
+            src[2],
+            src[3],
+            dst[0],
+            dst[1],
+            dst[2],
+            dst[3],
+            @intFromEnum(sampling),
+            if (paint) |p| p.handle else null,
+        );
+    }
+
+    /// 整張畫布的圖層，restore 時用 paint 的合成模式／透明度／濾鏡合成回去（擴充）。
+    pub fn saveLayer(self: Canvas, paint: ?Paint) void {
+        c.skiac_canvas_save_layer(self.handle, if (paint) |p| p.handle else null);
     }
 };
 

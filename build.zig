@@ -146,8 +146,14 @@ const ProducedFile = struct {
 /// Resolves a toolchain library by name, using the same search the compiler
 /// that built Skia uses, so the runtime always matches the binary.
 fn hostLibrary(b: *Build, name: []const u8) []const u8 {
-    const printed = b.run(&.{ "clang++", b.fmt("-print-file-name={s}", .{name}) });
-    return b.dupe(std.mem.trim(u8, printed, " \t\r\n"));
+    const arg = b.fmt("-print-file-name={s}", .{name});
+    // 沒裝 clang++ 時改問 g++：Linux 上 clang++ 用的就是系統 gcc 的 libstdc++，回的是同一個檔案
+    for ([_][]const u8{ "clang++", "g++" }) |cxx| {
+        var code: u8 = undefined;
+        const printed = b.runAllowFail(&.{ cxx, arg }, &code, .ignore) catch continue;
+        return b.dupe(std.mem.trim(u8, printed, " \t\r\n"));
+    }
+    std.process.fatal("找不到 clang++ 或 g++，無法取得 {s} 的路徑", .{name});
 }
 
 /// Skia is compiled by the host clang++. On Linux that is libstdc++, whose

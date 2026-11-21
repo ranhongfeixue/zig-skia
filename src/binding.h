@@ -311,6 +311,77 @@ void skiac_shaper_draw(
     int32_t baseline,
     skiac_paint* paint);
 
+// --- 擴充：canvas 2D 其餘的功能 -------------------------------------------
+// isPointInPath：路徑在 (x, y) 是否被填滿（fill_type 0 nonzero、1 evenodd）。
+bool skiac_path_contains(skiac_path* path, float x, float y, int32_t fill_type);
+
+// isPointInStroke：照筆畫參數（含虛線）把路徑展開成填滿的輪廓後判斷。
+// `dashes` 可為 NULL（dash_count 為 0 時不套用虛線）。
+bool skiac_path_stroke_contains(
+    skiac_path* path,
+    float x,
+    float y,
+    float width,
+    int32_t cap,
+    int32_t join,
+    float miter_limit,
+    const float* dashes,
+    int32_t dash_count,
+    float dash_phase);
+
+// setLineDash／lineDashOffset：`count` 為 0 時清除虛線。count 為奇數時照 canvas 規格重複一次。
+void skiac_paint_set_dash(skiac_paint* paint, const float* intervals, int32_t count, float phase);
+
+// createConicGradient：中心 (cx, cy)、從 x 軸起算 start_radians（順時針）一整圈。
+skiac_shader* skiac_shader_conic_gradient(
+    float cx,
+    float cy,
+    float start_radians,
+    const uint32_t* colors,
+    const float* positions,
+    int32_t count);
+
+// createPattern：以 `source` 目前的內容為圖樣。repeat_x／repeat_y 為 false 時該方向畫成透明（decal）。
+// `sampling` 0 nearest、1 linear、2 linear＋mipmap、3 cubic；`matrix_six` 是圖樣的 setTransform（a b c d e f），可為 NULL。
+skiac_shader* skiac_shader_surface_pattern(
+    skiac_surface* source,
+    bool repeat_x,
+    bool repeat_y,
+    int32_t sampling,
+    const float* matrix_six);
+
+// drawImage：跟 skiac_canvas_draw_surface_rect 一樣，但取樣方式照 imageSmoothingEnabled／imageSmoothingQuality。
+void skiac_canvas_draw_surface_rect_sampled(
+    skiac_canvas* canvas,
+    skiac_surface* source,
+    float src_x,
+    float src_y,
+    float src_width,
+    float src_height,
+    float dst_x,
+    float dst_y,
+    float dst_width,
+    float dst_height,
+    int32_t sampling,
+    skiac_paint* paint);
+
+// canvas 的 arc／ellipse 照 Blink 的 Path::AddEllipse：用 SkPath::arcTo（conic 曲線），整圈拆成兩個 180°；
+// 弧在 (cx, cy) 為中心、旋轉 rotation 的座標系建立，再乘上 matrix_six（a b c d e f，可為 NULL）接在目前的子路徑後面。
+void skiac_path_add_arc(
+    skiac_path* path,
+    float cx,
+    float cy,
+    float radius_x,
+    float radius_y,
+    float rotation,
+    float start_angle,
+    float sweep,
+    const float* matrix_six);
+
+// 整張畫布的圖層（Blink 的 full-canvas composite：source-in／copy 等會影響形狀外面的像素），
+// restore 時用 `paint` 的合成模式、透明度與濾鏡合成回去。paint 可為 NULL。
+void skiac_canvas_save_layer(skiac_canvas* canvas, skiac_paint* paint);
+
 #ifdef __cplusplus
 }
 #endif
